@@ -1,0 +1,34 @@
+name: manual-deploy
+
+# Fires only on manual dispatch. Authenticates as the `flexfic-manual-deploy`
+# app registration, whose flexible FIC is pinned to main AND to this event: the
+# repo's customized OIDC subject folds event_name into `sub`, so this identity
+# only trusts `event_name:workflow_dispatch`, plus the required repository_id
+# claim. Run it from the main branch.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required to request the GitHub OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login (OIDC via flexible FIC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_MANUAL }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prove authentication works (no identifying info)
+        run: |
+          echo "Confirming the flexible FIC login succeeded..."
+          # Token acquisition proves the OIDC federation worked. Print only the
+          # expiry timestamp, never the token or any account identifiers.
+          az account get-access-token --query expiresOn -o tsv \
+            && echo "Access token acquired — federated login OK."
+          # Resource-group count proves the Reader role resolved, with no names/IDs.
+          echo "Resource groups visible to this identity: $(az group list --query 'length(@)' -o tsv)"
