@@ -73,6 +73,65 @@ expressions Azure accepted), not from the docs.
 | `repository_id` / `repository_owner_id` | `eq` (**required**; either satisfies the gate, standalone or combined) | no operator works |
 | `event_name` | no operator works (fold it into `sub` instead — see finding 3) | no operator works |
 
+## UAMI vs. app registration — which identity to use
+
+Both are **workload identities** in Microsoft Entra ID (a thing your code can
+*be* so it can obtain Azure tokens). They differ in who owns and manages the
+lifecycle.
+
+**User-assigned managed identity (UAMI)**
+- An **Azure resource** (lives in a resource group, has an ARM resource ID);
+  Azure creates its service principal automatically.
+- **Azure fully manages the credentials** — you never see or rotate a secret.
+  You assign it RBAC roles and attach it to Azure compute (VM, Function, Container
+  App, AKS pod, …).
+- No API-permissions model, no user sign-in — it exists purely to *be* an
+  identity for a workload running **on** Azure.
+
+**App registration (+ its service principal)**
+- An Entra **directory object** you create and own. The app registration is the
+  definition; the **service principal** is its instance in your tenant that holds
+  role assignments.
+- **You manage** its credentials — client secrets, certificates, and
+  **federated credentials** (including flexible FIC) — plus any Microsoft Graph /
+  API permissions. Can be multi-tenant and can sign in users.
+
+### When to use which
+
+| | UAMI | App registration |
+|---|---|---|
+| What it is | Azure resource | Entra directory object |
+| Credential mgmt | Azure-managed (invisible) | You manage (secrets / certs / federated) |
+| Best for | Workloads running **on** Azure compute | Workloads running **outside** Azure |
+| Graph / API permissions | No | Yes |
+| Federated creds (OIDC) | Standard FIC yes; **flexible FIC no** (GitHub issuer) | Standard **and** flexible FIC |
+| This demo | ❌ can't do flexible FIC | ✅ required |
+
+- **Use a UAMI** when the workload runs on Azure compute and you want zero
+  credential handling (no secrets to rotate or leak), and you don't need Graph
+  permissions or multi-tenant behavior.
+- **Use an app registration** when the workload runs *outside* Azure (GitHub
+  Actions, another cloud, on-prem) so it must federate an **external** issuer, or
+  when you need Graph/API permissions, app roles, or multi-tenant.
+
+### Why this project uses app registrations
+
+The general rule ("external workload → app registration") and a sharp,
+non-obvious rule we proved empirically both point the same way:
+
+> **Flexible FIC (`claimsMatchingExpression`) for the GitHub issuer works only on
+> app registrations, not UAMIs.**
+
+The ARM API technically added the `claimsMatchingExpression` field to managed
+identities in `2025-05-31-preview`, but every GitHub expression is rejected at the
+Graph validation layer. Root cause: flexible FIC **requires** a `repository_id`
+(or `repository_owner_id`) claim with `eq`, and on a UAMI that claim accepts **no
+operator** — so the mandatory required-claim can never be satisfied. On an app
+registration, `repository_id eq` is accepted. GitHub Actions also runs on
+GitHub's runners (external issuer), not Azure compute, so there's nothing to
+attach a UAMI to anyway. App registration is the only workable choice on both
+counts.
+
 ## Prerequisites
 
 - `az` CLI, logged in: `az login` (rights to create app registrations + role
