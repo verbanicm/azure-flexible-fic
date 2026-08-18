@@ -73,6 +73,74 @@ expressions Azure accepted), not from the docs.
 | `repository_id` / `repository_owner_id` | `eq` (**required**; either satisfies the gate, standalone or combined) | no operator works |
 | `event_name` | no operator works (fold it into `sub` instead — see finding 3) | no operator works |
 
+### How the probes worked
+
+The findings above weren't read from docs — they were discovered by scripting a
+battery of candidate `claimsMatchingExpression` values against **live Azure** and
+recording which the platform accepted vs. rejected. Two throwaway probe scripts
+drove this (since removed):
+
+- **`probe-fic.sh`** — targeted a **user-assigned managed identity**, creating a
+  FIC per candidate expression via ARM (`az rest` against the MI
+  `federatedIdentityCredentials` endpoint, api-version `2025-05-31-preview`).
+- **`probe-app.sh`** — the same battery against an **app registration** via the
+  Microsoft Graph **beta** endpoint (`applications/{objectId}/federatedIdentityCredentials`).
+
+Each probe issued a create, captured Azure's response (ACCEPTED, or the exact
+rejection message), deleted the credential, and moved on. Rapid create/delete
+loops hit ARM throttling (`Service unavailable. Retry after 30 seconds`), so the
+scripts backed off between attempts.
+
+Two distinct validation layers surfaced, which is why some expressions failed
+differently:
+
+1. **ARM / parser layer** — checks that each claim+operator pair is *individually*
+   legal. Illegal pairs fail with e.g. *"cannot use the operator 'eq' for
+   comparisons involving claim 'event_name'."*
+2. **Graph "required-claims" layer** — even a parser-valid expression is rejected
+   unless it contains a required claim, with *"either lacks all required claims or
+   contains unallowed claims."*
+
+### Full probe results (GitHub issuer)
+
+**User-assigned managed identity — every GitHub expression REJECTED:**
+
+| Expression | Result |
+|---|---|
+| `sub eq 'repo:…:ref:refs/heads/main'` | ❌ lacks required claims |
+| `sub matches 'repo:…:ref:refs/heads/main'` (and branch/repo wildcards) | ❌ lacks required claims |
+| `job_workflow_ref matches …` (alone) | ❌ lacks required claims |
+| `sub matches … and job_workflow_ref matches …` | ❌ lacks required claims |
+| `sub matches … and repository_id eq …` | ❌ cannot use operator `eq` on `repository_id` |
+| `sub matches … and repository_id matches …` | ❌ cannot use operator `matches` on `repository_id` |
+| `sub matches … and repository_owner_id eq …` | ❌ cannot use operator `eq` on `repository_owner_id` |
+| `sub matches … and event_name eq/matches …` | ❌ cannot use operator on `event_name` |
+
+The MI is stuck in a dead end: the required-claims gate demands
+`repository_id`/`repository_owner_id`, but the parser layer forbids **every**
+operator on those claims for an MI — so the gate can never be satisfied.
+
+**App registration — the required claim unlocks it:**
+
+| Expression | Result |
+|---|---|
+| `sub eq/matches 'repo:…:ref:refs/heads/main'` (alone) | ❌ lacks required claims |
+| `job_workflow_ref matches …` (alone) | ❌ lacks required claims |
+| `sub matches … and event_name eq/matches …` | ❌ no operator works on `event_name` |
+| `sub matches … and repository_id eq …` | ✅ **ACCEPTED** |
+| `sub matches … and repository_owner_id eq …` | ✅ **ACCEPTED** |
+| `sub matches … and repository_id eq … and repository_owner_id eq …` | ✅ ACCEPTED (both together) |
+| `sub matches 'repo:…:ref:refs/heads/main' and job_workflow_ref matches … and repository_id eq …` | ✅ ACCEPTED (push vs. manual by workflow file) |
+
+**Takeaways that shaped the demo:**
+
+- The minimal accepted shape is `sub … and repository_id eq …` — one `sub`
+  predicate plus the required immutable claim.
+- Either `repository_id` *or* `repository_owner_id` (with `eq`) satisfies the
+  required-claims gate; you can also include both.
+- `event_name` is unusable as a claim on both identity types, which is why the
+  demo folds it into `sub` via a customized subject template instead.
+
 ## UAMI vs. app registration — which identity to use
 
 Both are **workload identities** in Microsoft Entra ID (a thing your code can
